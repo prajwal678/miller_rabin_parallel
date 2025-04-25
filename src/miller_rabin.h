@@ -7,26 +7,22 @@
 #include <random>
 #include <chrono>
 #include <omp.h>
-#include <stdint.h>
+#include <gmp.h>
 
-#define DEFAULT_ITERATIONS 10
+#define DEFAULT_ITERATIONS 20
 
-typedef uint64_t u64;
-typedef unsigned long long ull;
-
-// Structure to hold decomposition of n-1 as 2^r * d
+// decomposition of n-1 as 2^r * d
 struct MRDecomposition {
-    u64 r;
-    u64 d;
+    mpz_t r;
+    mpz_t d;
 };
 
-bool miller_rabin_cpu(u64 n, unsigned int iterations);
-bool miller_rabin_test_cpu(u64 n, u64 a, MRDecomposition decomp);
-MRDecomposition decompose(u64 n);
-u64 mod_pow_cpu(u64 base, u64 exponent, u64 modulus);
+bool miller_rabin_cpu(mpz_t n, unsigned int iterations);
+bool miller_rabin_test_cpu(mpz_t n, mpz_t a, MRDecomposition decomp);
+MRDecomposition decompose(mpz_t n);
 
-bool miller_rabin_parallel(u64 n, unsigned int iterations);
+bool miller_rabin_parallel(mpz_t n, unsigned int iterations);
 
-std::vector<u64> generate_random_bases(u64 n, unsigned int count);
+std::vector<mpz_t> generate_random_bases(mpz_t n, unsigned int count);
 
 #endif // MILLER_RABIN_H 

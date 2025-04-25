@@ -3,6 +3,7 @@
 #include <chrono>
 #include <random>
 #include <omp.h>
+#include <gmp.h>
 
 void print_usage(const char* program_name) {
     std::cerr << "Usage: " << program_name << " <number_to_test> [iterations]" << std::endl;
@@ -11,15 +12,20 @@ void print_usage(const char* program_name) {
               << DEFAULT_ITERATIONS << ")" << std::endl;
 }
 
-bool parse_arguments(int argc, char** argv, u64& number, unsigned int& iterations) {
+bool parse_arguments(int argc, char** argv, mpz_t number, unsigned int& iterations) {
     if (argc < 2 || argc > 3) {
         print_usage(argv[0]);
         return false;
     }
 
     try {
-        number = stoull(argv[1]);
-        if (number < 2) {
+        mpz_init(number);
+        if (mpz_set_str(number, argv[1], 10) != 0) {
+            std::cerr << "Error: Invalid number format" << std::endl;
+            return false;
+        }
+        
+        if (mpz_cmp_ui(number, 2) < 0) {
             std::cerr << "Error: Number must be at least 2" << std::endl;
             return false;
         }
@@ -41,21 +47,32 @@ bool parse_arguments(int argc, char** argv, u64& number, unsigned int& iteration
     return true;
 }
 
-// Generate random bases for Miller-Rabin test
-std::vector<u64> generate_random_bases(u64 n, unsigned int count) {
-    std::vector<u64> bases(count);
+std::vector<mpz_t> generate_random_bases(mpz_t n, unsigned int count) {
+    std::vector<mpz_t> bases(count);
+    
+    for (unsigned int i = 0; i < count; i++) {
+        mpz_init(bases[i]);
+    }
     
     #pragma omp parallel
     {
-        // each thread gen a random number (CPU side)
+        gmp_randstate_t state;
         unsigned int seed = std::chrono::system_clock::now().time_since_epoch().count() + omp_get_thread_num();
-        std::mt19937_64 generator(seed);
-        std::uniform_int_distribution<u64> distribution(2, n - 2);
+        gmp_randinit_default(state);
+        gmp_randseed_ui(state, seed);
+        
+        mpz_t max_base;
+        mpz_init(max_base);
+        mpz_sub_ui(max_base, n, 3);  // n-3
         
         #pragma omp for
         for (unsigned int i = 0; i < count; i++) {
-            bases[i] = distribution(generator);
+            mpz_urandomm(bases[i], state, max_base);
+            mpz_add_ui(bases[i], bases[i], 2);  // shift range to [2, n-2]
         }
+        
+        mpz_clear(max_base);
+        gmp_randclear(state);
     }
     
     return bases;
@@ -75,7 +92,14 @@ double Timer::elapsed_ms() {
     return std::chrono::duration<double, std::milli>(end_time - start_time).count();
 }
 
-void print_result(u64 number, bool is_prime, double elapsed_ms) {
-    std::cout << number << " is " << (is_prime ? "probably prime" : "composite") 
+void print_mpz(mpz_t num) {
+    char* str = mpz_get_str(NULL, 10, num);
+    std::cout << str;
+    free(str);
+}
+
+void print_result(mpz_t number, bool is_prime, double elapsed_ms) {
+    print_mpz(number);
+    std::cout << " is " << (is_prime ? "probably prime" : "composite") 
               << " (determined in " << elapsed_ms << " ms)" << std::endl;
 } 

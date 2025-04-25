@@ -1,101 +1,134 @@
 #include "miller_rabin.h"
 #include "utils.h"
 #include <iostream>
+#include <gmp.h>
 
-// Decompose n-1 as 2^r * d where d is odd
-MRDecomposition decompose(u64 n) {
+// n-1 as 2^r * d where d is odd
+MRDecomposition decompose(mpz_t n) {
     MRDecomposition result;
-    result.d = n - 1;
-    result.r = 0;
+    mpz_init(result.r);
+    mpz_init(result.d);
     
-    while (result.d % 2 == 0) {
-        result.d /= 2;
-        result.r++;
-    }
+    mpz_t n_minus_1;
+    mpz_init(n_minus_1);
+    mpz_sub_ui(n_minus_1, n, 1);
     
-    return result;
-}
-
-// Modular exponentiation: computes (base^exponent) % modulus
-u64 mod_pow_cpu(u64 base, u64 exponent, u64 modulus) {
-    if (modulus == 1) return 0;
+    // initialize d = n-1
+    mpz_set(result.d, n_minus_1);
+    mpz_set_ui(result.r, 0);
     
-    u64 result = 1;
-    base = base % modulus;
+    // largest power of 2 that divides n-1
+    mpz_t remainder;
+    mpz_init(remainder);
     
-    while (exponent > 0) {
-        if (exponent % 2 == 1) {
-            result = (result * base) % modulus;
+    while (true) {
+        mpz_mod_ui(remainder, result.d, 2);
+        if (mpz_cmp_ui(remainder, 0) != 0) {
+            break;  // d is odd
         }
-        exponent >>= 1;
-        base = (base * base) % modulus;
+        mpz_fdiv_q_ui(result.d, result.d, 2);  // d = d/2
+        mpz_add_ui(result.r, result.r, 1);     // r = r+1
     }
+    
+    mpz_clear(n_minus_1);
+    mpz_clear(remainder);
     
     return result;
 }
 
-// Single Miller-Rabin test with base a
-bool miller_rabin_test_cpu(u64 n, u64 a, MRDecomposition decomp) {
-    if (n == 2 || n == 3) return true;
-    if (n <= 1 || n % 2 == 0) return false;
+// single Miller-Rabin test with base a
+bool miller_rabin_test_cpu(mpz_t n, mpz_t a, MRDecomposition decomp) {
+    if (mpz_cmp_ui(n, 2) == 0 || mpz_cmp_ui(n, 3) == 0) return true;
+    if (mpz_cmp_ui(n, 1) <= 0 || mpz_divisible_ui_p(n, 2)) return false;
     
-    u64 d = decomp.d;
-    u64 r = decomp.r;
+    mpz_t x, n_minus_1;
+    mpz_init(x);
+    mpz_init(n_minus_1);
+    mpz_sub_ui(n_minus_1, n, 1);
     
-    // Compute a^d % n
-    u64 x = mod_pow_cpu(a, d, n);
+    mpz_powm(x, a, decomp.d, n);
     
-    // If a^d % n == 1 or a^d % n == n-1, n passes the test
-    if (x == 1 || x == n - 1) return true;
-    
-    // Square x, r-1 times
-    for (u64 i = 0; i < r - 1; i++) {
-        x = mod_pow_cpu(x, 2, n);
-        if (x == n - 1) return true;
+    // if a^d % n == 1 or a^d % n == n-1, n passes the test
+    if (mpz_cmp_ui(x, 1) == 0 || mpz_cmp(x, n_minus_1) == 0) {
+        mpz_clear(x);
+        mpz_clear(n_minus_1);
+        return true;
     }
     
-    // If we get here, n is definitely composite
+    mpz_t r_minus_1, i;
+    mpz_init(r_minus_1);
+    mpz_init_set_ui(i, 0);
+    mpz_sub_ui(r_minus_1, decomp.r, 1);
+    
+    while (mpz_cmp(i, r_minus_1) < 0) {
+        mpz_powm_ui(x, x, 2, n);  // x = x^2 % n
+        if (mpz_cmp(x, n_minus_1) == 0) {
+            mpz_clear(x);
+            mpz_clear(n_minus_1);
+            mpz_clear(r_minus_1);
+            mpz_clear(i);
+            return true;
+        }
+        mpz_add_ui(i, i, 1);
+    }
+    
+    mpz_clear(x);
+    mpz_clear(n_minus_1);
+    mpz_clear(r_minus_1);
+    mpz_clear(i);
+    
     return false;
 }
 
-// Full Miller-Rabin test with multiple iterations
-bool miller_rabin_cpu(u64 n, unsigned int iterations) {
-    if (n <= 1) return false;
-    if (n <= 3) return true;
-    if (n % 2 == 0) return false;
+// full Miller-Rabin test with multiple iterations
+bool miller_rabin_cpu(mpz_t n, unsigned int iterations) {
+    if (mpz_cmp_ui(n, 1) <= 0) return false;
+    if (mpz_cmp_ui(n, 2) == 0 || mpz_cmp_ui(n, 3) == 0) return true;
+    if (mpz_divisible_ui_p(n, 2)) return false;
     
-    // Decompose n-1 = 2^r * d
     MRDecomposition decomp = decompose(n);
+    std::vector<mpz_t> bases = generate_random_bases(n, iterations);
     
-    // Generate random bases
-    std::vector<u64> bases = generate_random_bases(n, iterations);
-    
-    // Test with each base
-    for (u64 a : bases) {
-        if (!miller_rabin_test_cpu(n, a, decomp)) {
-            return false;  // Definitely composite
+    for (unsigned int i = 0; i < iterations; i++) {
+        if (!miller_rabin_test_cpu(n, bases[i], decomp)) {
+            for (unsigned int j = 0; j < iterations; j++) {
+                mpz_clear(bases[j]);
+            }
+            mpz_clear(decomp.r);
+            mpz_clear(decomp.d);
+            return false;
         }
     }
     
-    return true;  // Probably prime
+    for (unsigned int i = 0; i < iterations; i++) {
+        mpz_clear(bases[i]);
+    }
+    mpz_clear(decomp.r);
+    mpz_clear(decomp.d);
+    
+    return true;  // PROBABLY primy BRUV, dont take true as yes
 }
 
 int main(int argc, char** argv) {
-    u64 number;
+    mpz_t number;
     unsigned int iterations;
     
     if (!parse_arguments(argc, argv, number, iterations)) {
+        mpz_clear(number);
         return 1;
     }
     
-    std::cout << "Testing if " << number << " is prime using " 
-              << iterations << " iterations..." << std::endl;
+    std::cout << "Testing if ";
+    print_mpz(number);
+    std::cout << " is prime using " << iterations << " iterations..." << std::endl;
     
     Timer timer("CPU Miller-Rabin test");
     bool is_prime = miller_rabin_cpu(number, iterations);
     double elapsed = timer.elapsed_ms();
     
     print_result(number, is_prime, elapsed);
+    
+    mpz_clear(number);
     
     return 0;
 } 

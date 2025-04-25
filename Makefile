@@ -1,8 +1,8 @@
 CC = g++
 NVCC = nvcc
-CFLAGS = -std=c++11 -O3 -fopenmp
-NVCCFLAGS = -std=c++11 -O3
-LDFLAGS = -lcuda -lcudart
+CFLAGS = -std=c++11 -O3 -fopenmp -lgmp
+NVCCFLAGS = -std=c++11 -O3 -lgmp
+LDFLAGS = -lcuda -lcudart -lgmp
 
 # Directories
 SRC_DIR = src

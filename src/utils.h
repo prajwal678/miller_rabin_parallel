@@ -3,13 +3,9 @@
 
 #include <vector>
 #include <string>
+#include <gmp.h>
 #include "miller_rabin.h"
 
-void print_usage(const char* program_name);
-
-bool parse_arguments(int argc, char** argv, u64& number, unsigned int& iterations);
-
-// Timer functions for benchmarking
 class Timer {
 private:
     std::chrono::high_resolution_clock::time_point start_time;
@@ -21,6 +17,9 @@ public:
     double elapsed_ms();
 };
 
-void print_result(u64 number, bool is_prime, double elapsed_ms);
+void print_usage(const char* program_name);
+bool parse_arguments(int argc, char** argv, mpz_t number, unsigned int& iterations);
+void print_mpz(mpz_t num);
+void print_result(mpz_t number, bool is_prime, double elapsed_ms);
 
 #endif // UTILS_H 
