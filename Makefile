@@ -1,39 +1,31 @@
 CC = g++
 NVCC = nvcc
-CFLAGS = -std=c++11 -O3 -fopenmp -lgmp
-NVCCFLAGS = -std=c++11 -O3 -lgmp
-LDFLAGS = -lcuda -lcudart -lgmp
+CFLAGS = -std=c++11 -O3 -fopenmp
+NVCCFLAGS = -std=c++11 -O3 -Xcompiler -fopenmp
+LDFLAGS = -lgmp
+CUDA_LDFLAGS = -lcuda -lcudart -lgmp
 
-# Directories
 SRC_DIR = src
 BIN_DIR = bin
 
-# Target executables
-CPU_TARGET = $(BIN_DIR)/miller_rabin_cpu
-PARALLEL_TARGET = $(BIN_DIR)/miller_rabin_parallel
+SEQ_TARGET = $(BIN_DIR)/miller_rabin_seq
+PAR_TARGET = $(BIN_DIR)/miller_rabin_par
 
-# Source files
 COMMON_SRC = $(SRC_DIR)/utils.cpp
-CPU_SRC = $(SRC_DIR)/miller_rabin_cpu.cpp
-CUDA_SRC = $(SRC_DIR)/miller_rabin_cuda.cu
-PARALLEL_SRC = $(SRC_DIR)/miller_rabin_parallel.cpp
+SEQ_SRC = $(SRC_DIR)/miller_rabin_seq.cpp $(SRC_DIR)/miller_rabin_cpu.cpp
+PAR_SRC = $(SRC_DIR)/miller_rabin_par.cu
 
-# Default target
-all: dirs $(CPU_TARGET) $(PARALLEL_TARGET)
+all: dirs $(SEQ_TARGET) $(PAR_TARGET)
 
-# Create bin directory if it doesn't exist
 dirs:
 	mkdir -p $(BIN_DIR)
 
-# CPU-only version
-$(CPU_TARGET): $(CPU_SRC) $(COMMON_SRC)
-	$(CC) $(CFLAGS) -o $@ $^
+$(SEQ_TARGET): $(SEQ_SRC) $(COMMON_SRC)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-# GPU version with CUDA
-$(PARALLEL_TARGET): $(PARALLEL_SRC) $(CUDA_SRC) $(COMMON_SRC)
-	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LDFLAGS)
+$(PAR_TARGET): $(PAR_SRC) $(COMMON_SRC) $(SRC_DIR)/miller_rabin_cpu.cpp
+	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(CUDA_LDFLAGS)
 
-# Clean
 clean:
 	rm -rf $(BIN_DIR)
 

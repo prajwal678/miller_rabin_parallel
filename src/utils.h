@@ -6,13 +6,16 @@
 #include <gmp.h>
 #include "miller_rabin.h"
 
+using namespace std;
+
+
 class Timer {
 private:
-    std::chrono::high_resolution_clock::time_point start_time;
-    std::string operation_name;
+    chrono::high_resolution_clock::time_point start_time;
+    string operation_name;
 
 public:
-    Timer(const std::string& name);
+    Timer(const string& name);
     ~Timer();
     double elapsed_ms();
 };

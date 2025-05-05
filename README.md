@@ -1,128 +1,92 @@
-# Parallel Primality Testing with Miller-Rabin
+# Miller-Rabin Primality Test: Sequential vs Parallel (CUDA)
 
-This project implements a parallel version of the Miller-Rabin primality test, using both CPU and GPU resources for efficient computation. The CPU generates random bases using OpenMP while the actual intensive computation is offloaded to the GPU using CUDA. It utilizes the GNU Multiple Precision Arithmetic Library (GMP) to handle arbitrarily large integers.
+This project implements and compares two versions of the Miller-Rabin primality test:
+1.  **Sequential:** A standard C++ implementation running entirely on the CPU.
+2.  **Parallel:** A hybrid implementation using OpenMP for parallel random base generation on the CPU and CUDA for massively parallel primality test computations on the GPU.
 
-## Overview
+## Features
 
-The Miller-Rabin primality test is a probabilistic algorithm used to determine if a given number is prime. The test is repeated multiple times with different random bases to increase accuracy. This implementation:
+*   Arbitrary-precision integer arithmetic using GMP.
+*   High-quality random number generation for bases using `/dev/urandom`.
+*   CUDA implementation for GPU acceleration.
+*   OpenMP for parallelizing CPU-bound tasks (base generation).
+*   Benchmarking script to compare performance and calculate speedup.
+*   Detailed performance metrics for the parallel implementation.
 
-1. Uses CPU with OpenMP to generate random bases in parallel
-2. Offloads the computationally intensive parts to the GPU using CUDA
-3. Leverages GMP for arbitrary-precision arithmetic to test very large numbers
-4. Demonstrates effective CPU-GPU collaboration for high-performance computing
+## Prerequisites
 
-## How It Works
+*   A C++11 compliant compiler (like g++)
+*   NVIDIA CUDA Toolkit (if running the parallel version)
+*   GNU Multiple Precision Arithmetic Library (GMP)
+*   Standard Unix utilities: `make`, `bc`, `xxd`, `dd`
 
-### Miller-Rabin Algorithm
+## Setup and Execution on Google Colab (Python 3 Environment)
 
-The Miller-Rabin primality test is based on Fermat's Little Theorem and works as follows:
+1.  **Open a Colab Notebook:** Start a new Colab notebook.
 
-1. For a number n, express n-1 as 2^r * d, where d is odd
-2. Pick a random base a (1 < a < n-1)
-3. Compute a^d mod n
-4. If a^d mod n = 1 or a^d mod n = n-1, the test passes for this base
-5. Otherwise, successively square the result (a^d mod n) up to r-1 times
-6. If at any point we get n-1, the test passes for this base
-7. If we never get n-1, the test fails and n is definitely composite
-8. If the test passes for multiple random bases, n is probably prime
+2.  **Select GPU Runtime (Required for Parallel Version):**
+    *   Go to `Runtime` -> `Change runtime type`.
+    *   Select `GPU` from the `Hardware accelerator` dropdown menu.
+    *   Click `Save`.
 
-### GMP (GNU Multiple Precision Arithmetic Library)
+3.  **Clone the Repository:**
+    ```python
+    !git clone <your-repository-url> 
+    %cd <your-repository-directory>
+    ```
+    *(Replace `<your-repository-url>` and `<your-repository-directory>`)*
 
-This implementation uses GMP to handle arbitrarily large integers, which is crucial for:
-- Cryptographic applications that require testing large primes (2048+ bits)
-- Mathematical research involving large numbers
-- Ensuring the algorithm works beyond the limits of built-in integer types
+4.  **Install Dependencies:**
+    ```python
+    !apt-get update
+    !apt-get install -y build-essential libgmp-dev bc xxd 
+    # Install CUDA toolkit if needed (might already be present on GPU runtimes)
+    !apt-get install -y nvidia-cuda-toolkit 
+    ```
 
-### Parallelization Strategy
+5.  **Compile the Code:**
+    ```python
+    !make clean
+    !make
+    ```
+    *Note: You might see warnings about file modification times, which can usually be ignored on Colab.*
 
-- **CPU (OpenMP)**: Handles the generation of random bases and test coordination
-- **GPU (CUDA)**: Performs the modular exponentiation operations which are computationally intensive
-- The workload is balanced to minimize data transfer overhead between CPU and GPU
-- For very large numbers (>2048 bits), the implementation falls back to CPU-only mode
+6.  **Make the Benchmark Script Executable:**
+    ```python
+    !chmod +x benchmark.sh
+    ```
+
+7.  **Run the Benchmark:**
+    ```python
+    !./benchmark.sh
+    ```
+    This will run both the sequential and parallel versions, testing primality for numbers of different bit sizes (512, 1024, 2048, 4096 by default) and outputting performance results.
+
+8.  **View the Results:**
+    ```python
+    !cat results/summary.md
+    ```
+    This command will display the summary report comparing the execution times and speedup achieved by the parallel version.
 
 ## Project Structure
 
-- `src/miller_rabin.h` - Header file with common definitions
-- `src/utils.h` and `src/utils.cpp` - Utility functions for GMP operations, timing, etc.
-- `src/miller_rabin_cpu.cpp` - CPU-only implementation for reference and fallback
-- `src/miller_rabin_cuda.cu` - CUDA kernels for GPU computation
-- `src/miller_rabin_parallel.cpp` - Main implementation with CPU-GPU collaboration
-- `Makefile` - Build configuration
-
-## Requirements
-
-- CUDA-capable GPU
-- CUDA Toolkit (11.0+)
-- GCC compiler with C++11 support
-- OpenMP support
-- GMP library (libgmp-dev)
-
-## Building the Project
-
-Ensure that you have the GMP library installed:
-
-```bash
-# On Debian/Ubuntu systems
-sudo apt-get install libgmp-dev
-
-# On Red Hat/Fedora systems
-sudo dnf install gmp-devel
+```
+.
+├── Makefile          # Builds the project
+├── benchmark.sh      # Runs tests and generates performance reports
+├── README.md         # This file
+├── results/          # Directory for benchmark output (created by benchmark.sh)
+└── src/
+    ├── miller_rabin.h        # Header file with common declarations
+    ├── miller_rabin_cpu.cpp  # CPU-specific functions (decompose, test_cpu)
+    ├── miller_rabin_par.cu   # Parallel implementation (OpenMP + CUDA)
+    ├── miller_rabin_seq.cpp  # Sequential implementation
+    ├── utils.h               # Header for utility functions
+    └── utils.cpp             # Utility functions (arg parsing, random base generation, timer)
 ```
 
-Then build the project:
-```bash
-make all
-```
+## How It Works
 
-This will build both the CPU-only and parallel CPU-GPU implementations.
-
-## Usage
-
-```bash
-./bin/miller_rabin_parallel <number_to_test> <iterations>
-```
-
-- `number_to_test`: The number to check for primality
-- `iterations`: Number of random bases to use (more iterations = higher accuracy)
-
-Example:
-```bash
-# Test a large prime number (2^127-1, a Mersenne prime)
-./bin/miller_rabin_parallel 170141183460469231731687303715884105727 10
-
-# Test a typical RSA-size prime (2048 bits)
-./bin/miller_rabin_parallel 24046160599707592863798669850366176895237918574067266777418021832975218908872540282527003105801022478618551734893103531276609521879587080134976170033251687 20
-```
-
-## Performance Comparison
-
-The CPU-GPU implementation significantly outperforms the CPU-only version for medium-sized numbers:
-
-- For 1024-bit numbers with 20 iterations:
-  - CPU-only: ~500ms
-  - CPU-GPU parallel: ~50ms (10x speedup)
-
-For very large numbers (>2048 bits), the implementation currently falls back to CPU-only mode due to CUDA limitations with arbitrary precision arithmetic.
-
-## How to Extend
-
-- Modify `MAX_BITS` in the CUDA file to handle larger numbers (requires more GPU memory)
-- Implement a more sophisticated CUDA big integer library for better performance
-- Adjust `BLOCK_SIZE` in the CUDA file to optimize for your specific GPU
-
-## Running on Google Colab
-
-If you don't have a local CUDA-capable GPU, you can run this project on Google Colab:
-
-1. Create a new Colab notebook
-2. Install GMP and CUDA tools:
-   ```
-   !apt-get update
-   !apt-get install -y libgmp-dev
-   ```
-3. Upload and build the project files
-4. Run the tests with large numbers
-
-## License
-
-MIT License 
+*   **Sequential (`miller_rabin_seq`):** Takes a number and iteration count. It generates random bases sequentially using `/dev/urandom` and performs the Miller-Rabin test entirely on the CPU using GMP for calculations.
+*   **Parallel (`miller_rabin_par`):** Takes a number and iteration count. It uses OpenMP to generate random bases in parallel on CPU cores (reading from `/dev/urandom` for each). The computationally intensive part (modular exponentiation) is offloaded to the GPU using a CUDA kernel. Data is transferred between CPU and GPU memory as needed. It falls back to a CPU implementation for numbers exceeding the `MAX_BITS` limit defined in the code.
+*   **Benchmarking (`benchmark.sh`):** Generates a large random number for each specified bit size. It then runs both the sequential and parallel executables with this *same* number and measures the execution time. It repeats this process multiple times and calculates the average times and speedup.

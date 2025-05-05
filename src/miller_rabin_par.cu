@@ -1,26 +1,39 @@
 #include "miller_rabin.h"
+#include "utils.h"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <stdio.h>
 #include <gmp.h>
-#include <curand_kernel.h>
+#include <chrono>
+#include <iostream>
+#include <omp.h>
+#include <random>
 
 #define BLOCK_SIZE 256
 #define MAX_BITS 2048
+#define DEFAULT_ITERATIONS 50
 
-#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
-inline void cudaAssert(cudaError_t code, const char *file, int line) {
-    if (code != cudaSuccess) {
-        fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(code), file, line);
-        exit(code);
-    }
-}
+using namespace std;
 
+
+typedef struct {
+    double total_time_ms;
+    double base_generation_time_ms;
+    double decomposition_time_ms;
+    double conversion_time_ms;
+    double memory_htod_time_ms;
+    double kernel_time_ms;
+    double memory_dtoh_time_ms;
+    double verification_time_ms;
+} PerformanceMetrics;
+
+// hehe big int
 typedef struct {
     unsigned int data[MAX_BITS/32 + 1];
     int bits;
 } CudaBigInt;
 
+// GMP mpz_t to CUDA format
 CudaBigInt mpz_to_cuda_bigint(mpz_t num) {
     CudaBigInt result;
     result.bits = mpz_sizeinbase(num, 2);
@@ -31,19 +44,16 @@ CudaBigInt mpz_to_cuda_bigint(mpz_t num) {
     return result;
 }
 
+// CUDA format back to GMP mpz_t
 void cuda_bigint_to_mpz(CudaBigInt* cbi, mpz_t result) {
     size_t count = (cbi->bits + 31) / 32;
     mpz_import(result, count, -1, sizeof(unsigned int), 0, 0, cbi->data);
 }
 
-
-// Device function for modular multiplication on CUDA
 __device__ void cuda_mod_mul(CudaBigInt* result, const CudaBigInt* a, const CudaBigInt* b, const CudaBigInt* modulus) {
-    // Reset result
     memset(result->data, 0, sizeof(unsigned int) * (MAX_BITS/32 + 1));
     result->bits = 0;
     
-    // Compute a * b
     unsigned long long carry = 0;
     for (int i = 0; i < (a->bits + 31) / 32; i++) {
         for (int j = 0; j < (b->bits + 31) / 32; j++) {
@@ -58,7 +68,6 @@ __device__ void cuda_mod_mul(CudaBigInt* result, const CudaBigInt* a, const Cuda
         }
     }
     
-    // Compute result mod modulus using division
     unsigned int q[MAX_BITS/32 + 1];
     memset(q, 0, sizeof(q));
     
@@ -75,10 +84,9 @@ __device__ void cuda_mod_mul(CudaBigInt* result, const CudaBigInt* a, const Cuda
     
     if (r_bits <= modulus->bits) {
         result->bits = r_bits;
-        return; // Result is already smaller than modulus
+        return;
     }
     
-    // Perform modulo operation
     for (int shift = r_bits - modulus->bits; shift >= 0; shift--) {
         bool can_subtract = true;
         for (int i = (modulus->bits + shift + 31) / 32 - 1; i >= 0; i--) {
@@ -129,7 +137,6 @@ __device__ void cuda_mod_mul(CudaBigInt* result, const CudaBigInt* a, const Cuda
         }
     }
     
-    // Calculate result bits
     for (int i = MAX_BITS/32; i >= 0; i--) {
         if (result->data[i] > 0) {
             result->bits = i * 32 + 32;
@@ -139,17 +146,15 @@ __device__ void cuda_mod_mul(CudaBigInt* result, const CudaBigInt* a, const Cuda
             break;
         }
     }
-    if (result->bits == 0) result->bits = 1; // At minimum 1 bit for zero
+    if (result->bits == 0) result->bits = 1;
 }
 
-// Device function for modular exponentiation on CUDA
+// modular exponentiation on CUDA
 __device__ void cuda_mod_pow(CudaBigInt* result, const CudaBigInt* base, const CudaBigInt* exponent, const CudaBigInt* modulus) {
-    // Initialize result to 1
     memset(result->data, 0, sizeof(unsigned int) * (MAX_BITS/32 + 1));
     result->data[0] = 1;
     result->bits = 1;
     
-    // Handle base case of exponent = 0
     bool is_zero = true;
     for (int i = 0; i < (exponent->bits + 31) / 32; i++) {
         if (exponent->data[i] != 0) {
@@ -159,18 +164,14 @@ __device__ void cuda_mod_pow(CudaBigInt* result, const CudaBigInt* base, const C
     }
     if (is_zero) return;
     
-    // Create a copy of base for squaring
     CudaBigInt base_copy;
     memcpy(&base_copy, base, sizeof(CudaBigInt));
     
-    // Square-and-multiply algorithm
     for (int bit_pos = exponent->bits - 1; bit_pos >= 0; bit_pos--) {
-        // Square result
         CudaBigInt squared;
         cuda_mod_mul(&squared, result, result, modulus);
         memcpy(result, &squared, sizeof(CudaBigInt));
         
-        // Multiply by base if current bit is set
         int word_idx = bit_pos / 32;
         int bit_idx = bit_pos % 32;
         if (exponent->data[word_idx] & (1 << bit_idx)) {
@@ -181,20 +182,16 @@ __device__ void cuda_mod_pow(CudaBigInt* result, const CudaBigInt* base, const C
     }
 }
 
-// CUDA kernel for Miller-Rabin test with one base per thread
-__global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* results, 
-                                   CudaBigInt d, CudaBigInt r, unsigned int iterations) {
+__global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* results, CudaBigInt d, CudaBigInt r, unsigned int iterations) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
     if (idx < iterations) {
         CudaBigInt a = bases[idx];
         bool is_prime = true;
         
-        // Miller-Rabin test with a single base
         CudaBigInt x;
         cuda_mod_pow(&x, &a, &d, &n);
         
-        // Check if x is 1 or n-1
         bool is_one = true;
         for (int i = 1; i < (x.bits + 31) / 32; i++) {
             if (x.data[i] != 0) {
@@ -204,7 +201,6 @@ __global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* resul
         }
         if (x.data[0] != 1) is_one = false;
         
-        // Calculate n-1 for comparison
         CudaBigInt n_minus_1;
         memcpy(&n_minus_1, &n, sizeof(CudaBigInt));
         n_minus_1.data[0]--; 
@@ -223,15 +219,12 @@ __global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* resul
         }
         
         if (!is_one && !is_n_minus_1) {
-            // Square x for r-1 iterations and check if it equals n-1
             bool found_minus_1 = false;
             for (unsigned int j = 0; j < r.data[0] - 1; j++) {
-                // Compute x = x^2 mod n
                 CudaBigInt squared;
                 cuda_mod_mul(&squared, &x, &x, &n);
                 memcpy(&x, &squared, sizeof(CudaBigInt));
                 
-                // Check if x is 1 (composite)
                 bool is_one = true;
                 for (int i = 1; i < (x.bits + 31) / 32; i++) {
                     if (x.data[i] != 0) {
@@ -246,7 +239,6 @@ __global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* resul
                     break;
                 }
                 
-                // Check if x is n-1
                 bool is_n_minus_1 = true;
                 for (int i = 0; i < (n.bits + 31) / 32; i++) {
                     if (x.data[i] != n_minus_1.data[i]) {
@@ -261,7 +253,6 @@ __global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* resul
                 }
             }
             
-            // If we never found x = n-1, n is composite
             if (!found_minus_1) {
                 is_prime = false;
             }
@@ -271,61 +262,150 @@ __global__ void miller_rabin_kernel(CudaBigInt n, CudaBigInt* bases, bool* resul
     }
 }
 
-// Host function to perform Miller-Rabin test on GPU with GMP
-bool miller_rabin_parallel(mpz_t n, unsigned int iterations) {
-    // Handle small cases on the host
+void print_performance_metrics(const PerformanceMetrics& metrics) {
+    printf("===== Performance Metrics =====\n");
+    printf("Total execution time:      %.3f ms\n", metrics.total_time_ms);
+    printf("Base generation time:      %.3f ms (%.1f%%)\n", metrics.base_generation_time_ms, 
+           (metrics.base_generation_time_ms / metrics.total_time_ms) * 100);
+    printf("Decomposition time:        %.3f ms (%.1f%%)\n", metrics.decomposition_time_ms, 
+           (metrics.decomposition_time_ms / metrics.total_time_ms) * 100);
+    printf("GMP to CUDA conversion:    %.3f ms (%.1f%%)\n", metrics.conversion_time_ms, 
+           (metrics.conversion_time_ms / metrics.total_time_ms) * 100);
+    printf("Host to device transfer:   %.3f ms (%.1f%%)\n", metrics.memory_htod_time_ms, 
+           (metrics.memory_htod_time_ms / metrics.total_time_ms) * 100);
+    printf("Kernel execution time:     %.3f ms (%.1f%%)\n", metrics.kernel_time_ms, 
+           (metrics.kernel_time_ms / metrics.total_time_ms) * 100);
+    printf("Device to host transfer:   %.3f ms (%.1f%%)\n", metrics.memory_dtoh_time_ms, 
+           (metrics.memory_dtoh_time_ms / metrics.total_time_ms) * 100);
+    printf("Result verification time:  %.3f ms (%.1f%%)\n", metrics.verification_time_ms, 
+           (metrics.verification_time_ms / metrics.total_time_ms) * 100);
+    printf("===================================\n");
+}
+
+bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metrics = nullptr) {
+    chrono::high_resolution_clock::time_point start_total, end_total;
+    chrono::high_resolution_clock::time_point start_temp, end_temp;
+    
+    if (metrics) {
+        metrics->total_time_ms = 0;
+        metrics->base_generation_time_ms = 0;
+        metrics->decomposition_time_ms = 0;
+        metrics->conversion_time_ms = 0;
+        metrics->memory_htod_time_ms = 0;
+        metrics->kernel_time_ms = 0;
+        metrics->memory_dtoh_time_ms = 0;
+        metrics->verification_time_ms = 0;
+        
+        start_total = chrono::high_resolution_clock::now();
+    }
+    
+    // handle small cases on host cuz overhead too much ( found out only after runnign on colab, wasted my creds tho)
     if (mpz_cmp_ui(n, 1) <= 0) return false;
     if (mpz_cmp_ui(n, 2) == 0 || mpz_cmp_ui(n, 3) == 0) return true;
     if (mpz_divisible_ui_p(n, 2)) return false;
     
-    // For very large numbers, we'll use the CPU implementation
-    // as a full CUDA implementation for arbitrary precision is complex
+    // Check if number exceeds MAX_BITS for CUDA impl
     int bits = mpz_sizeinbase(n, 2);
     if (bits > MAX_BITS) {
-        printf("Number has %d bits, which exceeds maximum of %d bits for CUDA implementation.\n", 
-               bits, MAX_BITS);
+        printf("Number has %d bits, which exceeds maximum of %d bits for CUDA implementation.\n", bits, MAX_BITS);
         printf("Falling back to CPU implementation.\n");
-        return miller_rabin_cpu(n, iterations);
+        
+        if (metrics) start_temp = chrono::high_resolution_clock::now();
+        bool cpu_result = miller_rabin_cpu(n, iterations);
+        if (metrics) {
+             end_temp = chrono::high_resolution_clock::now();
+             // Attribute the entire fallback time to "kernel" execution for simplicity in metrics
+             metrics->kernel_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+             
+             end_total = chrono::high_resolution_clock::now();
+             metrics->total_time_ms = chrono::duration<double, milli>(end_total - start_total).count();
+             
+             metrics->base_generation_time_ms = 0;
+             metrics->decomposition_time_ms = 0;
+             metrics->conversion_time_ms = 0;
+             metrics->memory_htod_time_ms = 0;
+             metrics->memory_dtoh_time_ms = 0;
+             metrics->verification_time_ms = 0;
+        }
+        return cpu_result;
     }
     
-    // Generate random bases on the CPU using OpenMP
-    std::vector<mpz_t> bases = generate_random_bases(n, iterations);
     
-    // Decompose n-1 = 2^r * d
+    // gen random bases on each thread using OpenMP
+    if (metrics) start_temp = chrono::high_resolution_clock::now();
+    vector<mpz_t> bases = generate_random_bases(n, iterations);
+    if (metrics) {
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->base_generation_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+    }
+    
+    // conv n-1 = 2^r * d
+    if (metrics) start_temp = chrono::high_resolution_clock::now();
     MRDecomposition decomp = decompose(n);
+    if (metrics) {
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->decomposition_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+    }
     
-    // Convert GMP numbers to CUDA-compatible format
+    // conv GMP numbers to CUDA-compatible format
+    if (metrics) start_temp = chrono::high_resolution_clock::now();
     CudaBigInt cuda_n = mpz_to_cuda_bigint(n);
     CudaBigInt cuda_d = mpz_to_cuda_bigint(decomp.d);
     CudaBigInt cuda_r = mpz_to_cuda_bigint(decomp.r);
     
-    // Convert bases to CUDA format
+    // conv bases to CUDA format
     CudaBigInt* host_cuda_bases = new CudaBigInt[iterations];
     for (unsigned int i = 0; i < iterations; i++) {
         host_cuda_bases[i] = mpz_to_cuda_bigint(bases[i]);
     }
+    if (metrics) {
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->conversion_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+    }
     
-    // Allocate device memory
     CudaBigInt* device_bases;
     bool* device_results;
     
-    cudaCheckError(cudaMalloc((void**)&device_bases, iterations * sizeof(CudaBigInt)));
-    cudaCheckError(cudaMalloc((void**)&device_results, iterations * sizeof(bool)));
+    cudaMalloc((void**)&device_bases, iterations * sizeof(CudaBigInt));
+    cudaMalloc((void**)&device_results, iterations * sizeof(bool));
     
-    // Copy data to device
-    cudaCheckError(cudaMemcpy(device_bases, host_cuda_bases, iterations * sizeof(CudaBigInt), cudaMemcpyHostToDevice));
+    if (metrics) start_temp = chrono::high_resolution_clock::now();
+    cudaMemcpy(device_bases, host_cuda_bases, iterations * sizeof(CudaBigInt), cudaMemcpyHostToDevice);
+    if (metrics) {
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->memory_htod_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+    }
     
-    // Launch kernel
+    cudaEvent_t kernel_start, kernel_end;
+    float kernel_time = 0;
+    if (metrics) {
+        cudaEventCreate(&kernel_start);
+        cudaEventCreate(&kernel_end);
+        cudaEventRecord(kernel_start);
+    }
+    
     int num_blocks = (iterations + BLOCK_SIZE - 1) / BLOCK_SIZE;
     miller_rabin_kernel<<<num_blocks, BLOCK_SIZE>>>(cuda_n, device_bases, device_results, cuda_d, cuda_r, iterations);
-    cudaCheckError(cudaGetLastError());
-    cudaCheckError(cudaDeviceSynchronize());
+    cudaGetLastError();
     
-    // Copy results back to host
+    if (metrics) {
+        cudaEventRecord(kernel_end);
+        cudaEventSynchronize(kernel_end);
+        cudaEventElapsedTime(&kernel_time, kernel_start, kernel_end);
+        metrics->kernel_time_ms = kernel_time;
+    } else {
+        cudaDeviceSynchronize();
+    }
+    
     bool* host_results = new bool[iterations];
-    cudaCheckError(cudaMemcpy(host_results, device_results, iterations * sizeof(bool), cudaMemcpyDeviceToHost));
+    if (metrics) start_temp = chrono::high_resolution_clock::now();
+    cudaMemcpy(host_results, device_results, iterations * sizeof(bool), cudaMemcpyDeviceToHost);
+    if (metrics) {
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->memory_dtoh_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+    }
     
-    // Check if all tests passed
+    if (metrics) start_temp = chrono::high_resolution_clock::now();
     bool is_prime = true;
     for (unsigned int i = 0; i < iterations; i++) {
         if (!host_results[i]) {
@@ -333,10 +413,13 @@ bool miller_rabin_parallel(mpz_t n, unsigned int iterations) {
             break;
         }
     }
+    if (metrics) {
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->verification_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+    }
     
-    // Clean up
-    cudaCheckError(cudaFree(device_bases));
-    cudaCheckError(cudaFree(device_results));
+    cudaFree(device_bases);
+    cudaFree(device_results);
     
     for (unsigned int i = 0; i < iterations; i++) {
         mpz_clear(bases[i]);
@@ -348,5 +431,39 @@ bool miller_rabin_parallel(mpz_t n, unsigned int iterations) {
     delete[] host_cuda_bases;
     delete[] host_results;
     
+    if (metrics) {
+        cudaEventDestroy(kernel_start);
+        cudaEventDestroy(kernel_end);
+        
+        end_total = chrono::high_resolution_clock::now();
+        metrics->total_time_ms = chrono::duration<double, milli>(end_total - start_total).count();
+    }
+    
     return is_prime;
+}
+
+int main(int argc, char** argv) {
+    mpz_t number;
+    unsigned int iterations;
+    
+    if (!parse_arguments(argc, argv, number, iterations)) {
+        mpz_clear(number);
+        return 1;
+    }
+    
+    cout << "Testing if ";
+    print_mpz(number);
+    cout << " is prime using " << iterations << " parallel iterations..." << endl;
+    cout << "Using CPU (OpenMP) for base generation and GPU (CUDA) for computation" << endl;
+    
+    PerformanceMetrics metrics;
+    bool is_prime = miller_rabin_par(number, iterations, &metrics);
+    
+    cout << "Total execution time: " << metrics.total_time_ms << " ms" << endl;
+    print_result(number, is_prime, metrics.total_time_ms);
+    print_performance_metrics(metrics);
+    
+    mpz_clear(number);
+    
+    return 0;
 } 

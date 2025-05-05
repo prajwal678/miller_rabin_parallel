@@ -2,46 +2,15 @@
 #include "utils.h"
 #include <iostream>
 #include <gmp.h>
-#include <vector>
+#include <chrono>
+#include <stdexcept>
+#include <random>
 
 using namespace std;
 
 
-// n-1 as 2^r * d where d is odd
-MRDecomposition decompose(mpz_t n) {
-    MRDecomposition result;
-    mpz_init(result.r);
-    mpz_init(result.d);
-    
-    mpz_t n_minus_1;
-    mpz_init(n_minus_1);
-    mpz_sub_ui(n_minus_1, n, 1);
-    
-    // initI d = n-1
-    mpz_set(result.d, n_minus_1);
-    mpz_set_ui(result.r, 0);
-    
-    // largest power of 2 that divides n-1
-    mpz_t remainder;
-    mpz_init(remainder);
-    
-    while (true) {
-        mpz_mod_ui(remainder, result.d, 2);
-        if (mpz_cmp_ui(remainder, 0) != 0) {
-            break;
-        }
-        mpz_fdiv_q_ui(result.d, result.d, 2);  // d = d/2
-        mpz_add_ui(result.r, result.r, 1);     // r = r+1
-    }
-    
-    mpz_clear(n_minus_1);
-    mpz_clear(remainder);
-    
-    return result;
-}
-
-// single Miller-Rabin test with base a
-bool miller_rabin_test_cpu(mpz_t n, mpz_t a, MRDecomposition decomp) {
+// Single Miller-Rabin test with base a
+bool miller_rabin_test_seq(mpz_t n, mpz_t a, MRDecomposition decomp) {
     if (mpz_cmp_ui(n, 2) == 0 || mpz_cmp_ui(n, 3) == 0) return true;
     if (mpz_cmp_ui(n, 1) <= 0 || mpz_divisible_ui_p(n, 2)) return false;
     
@@ -52,7 +21,7 @@ bool miller_rabin_test_cpu(mpz_t n, mpz_t a, MRDecomposition decomp) {
     
     mpz_powm(x, a, decomp.d, n);
     
-    // if a^d % n == 1 or a^d % n == n-1, n passes the test (WRITING CUZ CANT KEEEP READING THIS SHIT)
+    // if a^d % n == 1 or a^d % n == n-1, n passes the test
     if (mpz_cmp_ui(x, 1) == 0 || mpz_cmp(x, n_minus_1) == 0) {
         mpz_clear(x);
         mpz_clear(n_minus_1);
@@ -84,23 +53,19 @@ bool miller_rabin_test_cpu(mpz_t n, mpz_t a, MRDecomposition decomp) {
     return false;
 }
 
-// full Miller-Rabin test with multiple iterations
-bool miller_rabin_cpu(mpz_t n, unsigned int iterations) {
+bool miller_rabin_seq(mpz_t n, unsigned int iterations) {
     if (mpz_cmp_ui(n, 1) <= 0) return false;
     if (mpz_cmp_ui(n, 2) == 0 || mpz_cmp_ui(n, 3) == 0) return true;
     if (mpz_divisible_ui_p(n, 2)) return false;
     
     MRDecomposition decomp = decompose(n);
-    vector<mpz_t> bases = generate_random_bases(n, iterations);
+    vector<mpz_t> bases = generate_random_bases_seq(n, iterations);
     
+    bool probable_prime = true;
     for (unsigned int i = 0; i < iterations; i++) {
-        if (!miller_rabin_test_cpu(n, bases[i], decomp)) {
-            for (unsigned int j = 0; j < iterations; j++) {
-                mpz_clear(bases[j]);
-            }
-            mpz_clear(decomp.r);
-            mpz_clear(decomp.d);
-            return false;
+        if (!miller_rabin_test_seq(n, bases[i], decomp)) {
+            probable_prime = false;
+            break;
         }
     }
     
@@ -110,10 +75,10 @@ bool miller_rabin_cpu(mpz_t n, unsigned int iterations) {
     mpz_clear(decomp.r);
     mpz_clear(decomp.d);
     
-    return true;  // PROBABLY primy BRUV, dont take true as yes
+    return probable_prime;
 }
 
-int main_cpu(int argc, char** argv) {
+int main(int argc, char** argv) {
     mpz_t number;
     unsigned int iterations;
     
@@ -124,12 +89,14 @@ int main_cpu(int argc, char** argv) {
     
     cout << "Testing if ";
     print_mpz(number);
-    cout << " is prime using " << iterations << " iterations..." << endl;
+    cout << " is prime using " << iterations << " sequential iterations..." << endl;
     
-    Timer timer("CPU Miller-Rabin test");
-    bool is_prime = miller_rabin_cpu(number, iterations);
-    double elapsed = timer.elapsed_ms();
+    auto start_time = chrono::high_resolution_clock::now();
+    bool is_prime = miller_rabin_seq(number, iterations);
+    auto end_time = chrono::high_resolution_clock::now();
+    double elapsed = chrono::duration<double, milli>(end_time - start_time).count();
     
+    cout << "Total execution time: " << elapsed << " ms" << endl;
     print_result(number, is_prime, elapsed);
     
     mpz_clear(number);
