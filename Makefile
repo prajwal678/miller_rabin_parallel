@@ -1,7 +1,7 @@
 CC = g++
 NVCC = nvcc
 CFLAGS = -std=c++11 -O3 -fopenmp
-NVCCFLAGS = -std=c++11 -O3 -Xcompiler -fopenmp
+NVCCFLAGS = -std=c++11 -O3 -Xcompiler -fopenmp --use_fast_math -gencode arch=compute_70,code=sm_70
 LDFLAGS = -lgmp
 CUDA_LDFLAGS = -lcuda -lcudart -lgmp
 

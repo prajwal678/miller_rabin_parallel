@@ -9,8 +9,8 @@
 #include <omp.h>
 #include <random>
 
-#define BLOCK_SIZE 256
-#define MAX_BITS 2048
+#define BLOCK_SIZE 1024
+#define MAX_BITS 32768
 #define DEFAULT_ITERATIONS 50
 
 using namespace std;
@@ -299,13 +299,20 @@ bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metr
         start_total = chrono::high_resolution_clock::now();
     }
     
-    // handle small cases on host cuz overhead too much ( found out only after runnign on colab, wasted my creds tho)
     if (mpz_cmp_ui(n, 1) <= 0) return false;
     if (mpz_cmp_ui(n, 2) == 0 || mpz_cmp_ui(n, 3) == 0) return true;
     if (mpz_divisible_ui_p(n, 2)) return false;
     
-    // Check if number exceeds MAX_BITS for CUDA impl
     int bits = mpz_sizeinbase(n, 2);
+    int batch_size = iterations;
+    
+    if (bits > 8192) {
+        batch_size = min(iterations, 32);
+    }
+    else if (bits > 4096) {
+        batch_size = min(iterations, 64);
+    }
+    
     if (bits > MAX_BITS) {
         printf("Number has %d bits, which exceeds maximum of %d bits for CUDA implementation.\n", bits, MAX_BITS);
         printf("Falling back to CPU implementation.\n");
@@ -314,7 +321,6 @@ bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metr
         bool cpu_result = miller_rabin_cpu(n, iterations);
         if (metrics) {
              end_temp = chrono::high_resolution_clock::now();
-             // Attribute the entire fallback time to "kernel" execution for simplicity in metrics
              metrics->kernel_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
              
              end_total = chrono::high_resolution_clock::now();
@@ -330,8 +336,6 @@ bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metr
         return cpu_result;
     }
     
-    
-    // gen random bases on each thread using OpenMP
     if (metrics) start_temp = chrono::high_resolution_clock::now();
     vector<mpz_t> bases = generate_random_bases(n, iterations);
     if (metrics) {
@@ -339,7 +343,6 @@ bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metr
         metrics->base_generation_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
     }
     
-    // conv n-1 = 2^r * d
     if (metrics) start_temp = chrono::high_resolution_clock::now();
     MRDecomposition decomp = decompose(n);
     if (metrics) {
@@ -347,79 +350,86 @@ bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metr
         metrics->decomposition_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
     }
     
-    // conv GMP numbers to CUDA-compatible format
-    if (metrics) start_temp = chrono::high_resolution_clock::now();
+    bool is_prime = true;
     CudaBigInt cuda_n = mpz_to_cuda_bigint(n);
     CudaBigInt cuda_d = mpz_to_cuda_bigint(decomp.d);
     CudaBigInt cuda_r = mpz_to_cuda_bigint(decomp.r);
     
-    // conv bases to CUDA format
-    CudaBigInt* host_cuda_bases = new CudaBigInt[iterations];
-    for (unsigned int i = 0; i < iterations; i++) {
-        host_cuda_bases[i] = mpz_to_cuda_bigint(bases[i]);
-    }
-    if (metrics) {
-        end_temp = chrono::high_resolution_clock::now();
-        metrics->conversion_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
-    }
-    
-    CudaBigInt* device_bases;
-    bool* device_results;
-    
-    cudaMalloc((void**)&device_bases, iterations * sizeof(CudaBigInt));
-    cudaMalloc((void**)&device_results, iterations * sizeof(bool));
-    
     if (metrics) start_temp = chrono::high_resolution_clock::now();
-    cudaMemcpy(device_bases, host_cuda_bases, iterations * sizeof(CudaBigInt), cudaMemcpyHostToDevice);
-    if (metrics) {
-        end_temp = chrono::high_resolution_clock::now();
-        metrics->memory_htod_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
-    }
     
     cudaEvent_t kernel_start, kernel_end;
-    float kernel_time = 0;
     if (metrics) {
         cudaEventCreate(&kernel_start);
         cudaEventCreate(&kernel_end);
-        cudaEventRecord(kernel_start);
     }
     
-    int num_blocks = (iterations + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    miller_rabin_kernel<<<num_blocks, BLOCK_SIZE>>>(cuda_n, device_bases, device_results, cuda_d, cuda_r, iterations);
-    cudaGetLastError();
-    
-    if (metrics) {
-        cudaEventRecord(kernel_end);
-        cudaEventSynchronize(kernel_end);
-        cudaEventElapsedTime(&kernel_time, kernel_start, kernel_end);
-        metrics->kernel_time_ms = kernel_time;
-    } else {
-        cudaDeviceSynchronize();
-    }
-    
-    bool* host_results = new bool[iterations];
-    if (metrics) start_temp = chrono::high_resolution_clock::now();
-    cudaMemcpy(host_results, device_results, iterations * sizeof(bool), cudaMemcpyDeviceToHost);
-    if (metrics) {
-        end_temp = chrono::high_resolution_clock::now();
-        metrics->memory_dtoh_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
-    }
-    
-    if (metrics) start_temp = chrono::high_resolution_clock::now();
-    bool is_prime = true;
-    for (unsigned int i = 0; i < iterations; i++) {
-        if (!host_results[i]) {
-            is_prime = false;
-            break;
+    for (unsigned int batch_start = 0; batch_start < iterations && is_prime; batch_start += batch_size) {
+        unsigned int current_batch_size = min(batch_size, iterations - batch_start);
+        
+        CudaBigInt* host_cuda_bases = new CudaBigInt[current_batch_size];
+        
+        #pragma omp parallel for
+        for (unsigned int i = 0; i < current_batch_size; i++) {
+            host_cuda_bases[i] = mpz_to_cuda_bigint(bases[batch_start + i]);
         }
-    }
-    if (metrics) {
-        end_temp = chrono::high_resolution_clock::now();
-        metrics->verification_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count();
+        
+        CudaBigInt* device_bases;
+        bool* device_results;
+        bool* host_results = new bool[current_batch_size];
+        
+        cudaMalloc((void**)&device_bases, current_batch_size * sizeof(CudaBigInt));
+        cudaMalloc((void**)&device_results, current_batch_size * sizeof(bool));
+        
+        cudaMemcpy(device_bases, host_cuda_bases, current_batch_size * sizeof(CudaBigInt), cudaMemcpyHostToDevice);
+        
+        float kernel_time = 0;
+        
+        if (metrics) {
+            cudaEventRecord(kernel_start);
+        }
+        
+        int num_blocks = (current_batch_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        miller_rabin_kernel<<<num_blocks, BLOCK_SIZE>>>(cuda_n, device_bases, device_results, cuda_d, cuda_r, current_batch_size);
+        cudaGetLastError();
+        
+        if (metrics) {
+            cudaEventRecord(kernel_end);
+            cudaEventSynchronize(kernel_end);
+            cudaEventElapsedTime(&kernel_time, kernel_start, kernel_end);
+            metrics->kernel_time_ms += kernel_time;
+        }
+        else {
+            cudaDeviceSynchronize();
+        }
+        
+        cudaMemcpy(host_results, device_results, current_batch_size * sizeof(bool), cudaMemcpyDeviceToHost);
+        
+        for (unsigned int i = 0; i < current_batch_size; i++) {
+            if (!host_results[i]) {
+                is_prime = false;
+                break;
+            }
+        }
+        
+        cudaFree(device_bases);
+        cudaFree(device_results);
+        delete[] host_cuda_bases;
+        delete[] host_results;
+        
+        if (!is_prime) break;
     }
     
-    cudaFree(device_bases);
-    cudaFree(device_results);
+    if (metrics) {
+        cudaEventDestroy(kernel_start);
+        cudaEventDestroy(kernel_end);
+        
+        end_temp = chrono::high_resolution_clock::now();
+        metrics->conversion_time_ms = chrono::duration<double, milli>(end_temp - start_temp).count() - metrics->kernel_time_ms;
+        // Since we've included memory operations in the conversion time, set these to 0
+        metrics->memory_htod_time_ms = 0;
+        metrics->memory_dtoh_time_ms = 0;
+        metrics->verification_time_ms = 0;
+    }
     
     for (unsigned int i = 0; i < iterations; i++) {
         mpz_clear(bases[i]);
@@ -428,13 +438,7 @@ bool miller_rabin_par(mpz_t n, unsigned int iterations, PerformanceMetrics* metr
     mpz_clear(decomp.r);
     mpz_clear(decomp.d);
     
-    delete[] host_cuda_bases;
-    delete[] host_results;
-    
     if (metrics) {
-        cudaEventDestroy(kernel_start);
-        cudaEventDestroy(kernel_end);
-        
         end_total = chrono::high_resolution_clock::now();
         metrics->total_time_ms = chrono::duration<double, milli>(end_total - start_total).count();
     }
